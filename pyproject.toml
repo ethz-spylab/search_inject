@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "search-inject"
+version = "0.2.0"
+description = "Drop chosen URLs into a model's web_search results — test belief conditional on retrieval."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+keywords = ["llm", "web-search", "tool-use", "retrieval", "bias", "research"]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = ["requests>=2.25"]
+
+[project.urls]
+Repository = "https://github.com/ethz-spylab/search_inject"
+Issues = "https://github.com/ethz-spylab/search_inject/issues"
+
+[project.optional-dependencies]
+anthropic = ["anthropic>=0.40"]
+openai = ["openai>=1.40"]      # also covers the OpenRouter (OpenAI-compatible) path
+gemini = ["google-genai>=0.3"]
+all = ["anthropic>=0.40", "openai>=1.40", "google-genai>=0.3"]
+
+[tool.setuptools]
+# single-package layout: this directory IS the package `search_inject`
+packages = ["search_inject"]
+package-dir = { "search_inject" = "." }
