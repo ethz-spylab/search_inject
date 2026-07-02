@@ -40,7 +40,7 @@ def tool_schema(provider):
 
 
 def format_results(results):
-    """Render result dicts as a clean SERP-style text block for tool output
+    """Render result dicts as a clean search-results text block for tool output
     (used for anthropic/openai tool_result content). Gemini takes the raw list.
     When a result carries `content` (native tools deliver a KB-scale excerpt per
     result, not just a snippet), include it so the model sees comparable depth."""

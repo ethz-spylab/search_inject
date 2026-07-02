@@ -1,14 +1,13 @@
 # search_inject
 
-Drop chosen URLs into a model's `web_search` results. A higher-order factory
-turns a list of inject-URLs into a `(tool_schema, handler)` pair for Anthropic,
-OpenAI/OpenRouter, or Gemini. The tool is named **`web_search`** and described
-to look like a native search tool, so the model treats it as ordinary — but the
-results always include your page(s), surfaced alongside genuine web results.
+A drop-in `web_search` tool for Anthropic, OpenAI/OpenRouter, and Gemini that returns
+real web results with your own page(s) mixed in. From the model's side it's just
+search — you decide what shows up in the results.
 
-Use it to test **belief conditional on retrieval** when a model's real search
-hasn't indexed your page (e.g. testing whether a model trusts a single source
-it "finds" in a search), without waiting on (or fighting) indexing.
+Use it to measure *belief conditional on retrieval*: once a page is in the results,
+does the model trust it, cite it, repeat its claims? — no waiting on a search engine to
+index it first. `make_web_search_tool(...)` returns a `(schema, handler)` pair; you call
+`handler(query)` inside your own tool-use loop.
 
 ## How LLM web search differs from human search
 
@@ -22,6 +21,12 @@ see *Design & rationale*):
   it, the model already has it: each result arrives with a multi-KB excerpt of the page
   (~2–5 KB), and it answers from those directly. A separate "open this page" action
   exists but is a rarely-used fallback.
+- **When it *does* open a page, it gets a rendering — not the raw HTML.** A native fetch
+  (Claude's `web_fetch`, Gemini's `url_context`) returns *cleaned, readable* page text,
+  and what it includes differs by provider: Claude also surfaces a `<meta>` header (title,
+  `og:`/`twitter:` tags); Gemini returns text only. So even fetching is a provider-shaped
+  view of the page, not the page itself — which is why the fetch companion ships renderers
+  that reproduce each shape (see *The `web_fetch` companion tool*).
 - **It asks several things at once.** Instead of one query refined by hand, the tool
   often fans one question into several sub-queries (Gemini's grounding especially —
   3–12), runs them, and merges the results — all server-side.
@@ -34,6 +39,23 @@ model believe it?"* you need to control the results, which native search won't a
 So you replace it with a **function tool** you define: the model calls it, *your* code
 returns real results **plus** your page — presented the way a native tool would. That's
 `search_inject`.
+
+## Real pages, fabricated pages
+
+Every URL the tool handles is one of two kinds — and this split *is* the idea:
+
+- **Real pages** — any URL you don't inject — come from the actual backend and are
+  fetched **faithfully** from the live web. The model triangulates against the genuine
+  internet.
+- **Fabricated pages** — the URLs you pass to `inject_urls` — **never need to exist.**
+  The tool drops them into the search results and serves *your* content when the model
+  opens them, so a page that was never registered, hosted, or indexed reaches the model
+  exactly like a real hit. Nothing touches the network for it.
+
+That's what makes the causal question tractable: you ask *"if this page were on the web,
+would the model believe it?"* by putting it there — for the model — without publishing
+anything, and with real competitors still in the mix. Authoring a fabricated page and
+wiring it in is a few lines — see [Setting up a fabricated site](#setting-up-a-fabricated-site).
 
 ## Install
 ```bash
@@ -49,18 +71,42 @@ The core has **one** dependency (`requests`); everything else is stdlib. The
 optional extras are only needed for the SDK you call:
 `.[anthropic]`, `.[openai]`, `.[gemini]`, or `.[all]`.
 
-A real-results backend needs an API key (set in the env or passed as
-`backend_key=`):
+A **backend** supplies the genuine web results your injected URLs are spliced into.
+Pick one with `backend="..."`, and give it a key — either pass `backend_key="sk-..."`
+explicitly, **or** set the env var named below and leave `backend_key` unset (the
+backend reads it):
 
-| backend | key | source of real results |
+| `backend=` | key (env var) | source of real results |
 |---|---|---|
-| `brave`  | `BRAVE_API_KEY`  | Brave Search API (Claude's confirmed backend) |
-| `openai` | `OPENAI_API_KEY` | OpenAI's *own* `web_search` tool (faithful for GPT) |
-| `gemini` | `GOOGLE_API_KEY` | Gemini Google-search grounding (faithful for Gemini) |
-| `serper` | `SERPER_API_KEY` | Serper.dev (cheap Google proxy) |
-| `null`   | —                | none — your injected URLs become the whole result set |
+| `"brave"`  | `BRAVE_API_KEY`  | Brave Search API (Claude's confirmed backend) |
+| `"openai"` | `OPENAI_API_KEY` | OpenAI's *own* `web_search` tool (faithful for GPT) |
+| `"gemini"` | `GOOGLE_API_KEY` | Gemini Google-search grounding (faithful for Gemini) |
+| `"serper"` | `SERPER_API_KEY` | Serper.dev (cheap Google proxy) |
+| `"null"`   | *(none)*         | no real results — your injected URLs *are* the whole result set |
 
-Or pass your own `real_search=callable(query)->[{title,url,snippet}]`.
+```python
+make_web_search_tool(inject_urls, provider="openai", backend="brave", backend_key=BRAVE_KEY)
+# or: export BRAVE_API_KEY=... in the env, then just backend="brave"
+```
+
+### Bring your own search (`real_search`)
+
+Instead of a built-in backend, pass **`real_search`** — *any function you write* that
+takes the query string and returns a list of result dicts. Use it for a provider we
+don't ship, your own retrieval stack, a cache/replay layer, or deterministic test
+fixtures:
+
+```python
+def my_search(query: str) -> list[dict]:
+    hits = my_search_api(query)          # ← whatever gives you results
+    return [{"title": h.title, "url": h.url, "snippet": h.summary} for h in hits]
+
+make_web_search_tool(inject_urls, provider="openai", real_search=my_search)
+```
+
+Each result dict needs **`title`**, **`url`**, **`snippet`** (add a **`content`** field
+too if you're content-bundling). `real_search` takes precedence over `backend`, so you
+don't need a backend key when you pass it.
 
 ## Quick start
 ```python
@@ -68,13 +114,16 @@ from search_inject import make_web_search_tool, format_results
 
 schema, handler = make_web_search_tool(
     ["https://example.com/my-article/"],
-    provider="anthropic",          # 'anthropic' | 'openai' | 'gemini'
+    provider="anthropic",          # 'anthropic' | 'openai' | 'gemini' — sets the schema's shape
     backend="brave", backend_key=BRAVE_KEY,
     rank="top")                    # 'top' | 'blend' | 'bottom'
 
-# in your tool-use loop, when the model calls web_search(query):
-results = handler(query)           # [{title, url, snippet}, ...] (real + injected)
-tool_output = format_results(results)   # SERP-style text for the tool_result
+# `schema` is the tool *definition* (name/description/params) — register it with the model:
+resp = client.messages.create(model=..., tools=[schema], messages=[...])
+
+# `handler` is what YOU run when the model then calls web_search(query="..."):
+results = handler(query)           # [{title, url, snippet}, ...]  (real results + your injected page)
+tool_output = format_results(results)   # search-results text to hand back as the tool_result
 ```
 Injected entries are auto-built from each URL's `og:title`/`og:description`, so
 they read like organic hits. Override with `snippets={url: {"title","snippet"}}`.
@@ -83,6 +132,28 @@ See `example_claude.py` for the full Anthropic loop (with the no-injection
 control). OpenAI/Gemini use the same `handler`; only the schema shape and the
 tool-result plumbing differ (`format_results` text for OpenAI; raw list for
 Gemini function responses).
+
+### `make_web_search_tool` parameters
+
+| arg | what it does |
+|---|---|
+| `inject_urls` | the URL(s) of your page(s) to surface in every result set |
+| `provider` | `"anthropic"` \| `"openai"` \| `"gemini"` — shape of the returned tool schema |
+| `backend`, `backend_key` | source of the **real** results (`"brave"` / `"serper"` / `"null"`) and its API key |
+| `real_search` | a callable `query -> [{title, url, snippet}, ...]` that supplies the real results *yourself*. **Overrides `backend`** (and needs no key) — use it for a search source we don't bundle, an internal index, or fixed/cached results for offline, deterministic tests |
+| `rank` | where injected entries sit among the real ones: `"top"` \| `"blend"` \| `"bottom"` |
+| `snippets` | `{url: {"title", "snippet"}}` — the **result line** for an injected URL. Omit for a real, live URL (auto-built from its `og:` tags); supply it for a **fabricated** URL (no live page to scrape) |
+| `contents` | `{url: body}` — the **full page body** for an injected URL: bundled into the result when `content_chars>0`, and served by the `web_fetch` companion |
+| `content_chars` | if `>0`, attach that many chars of body to each result (~4500 ≈ native); `0` = one-line snippets only (see *Matching a native web-search tool* below) |
+| `camouflage_inject` | make injected entries mimic the real results' URL-tag / snippet style — on by default (see [Camouflage](#camouflage-on-by-default)) |
+| `fan_out` | `>1` → emulate Gemini's server-side sub-query fan-out from one tool call (see *Matching a native web-search tool*) |
+
+**`snippets` vs. `contents`** — the pair that's easy to conflate, both keyed by URL:
+
+- `snippets[url]` = the *result line* (title + one-liner shown in the list).
+- `contents[url]` = the *page body* (bundled into the result and returned on fetch).
+
+A fabricated site usually sets **both**: `snippets` for the hit, `contents` for the body.
 
 ## Matching a *native* web-search tool (content, fan-out, replicas)
 
@@ -118,49 +189,175 @@ make_web_search_tool(inject_urls, ..., fan_out=4,
                      fan_out_fn=my_llm_decomposer)   # callable(query,n)->[str]; default = heuristic
 ```
 
-**Per-model replicas** — presets bundling the right dials for each model's native
-tool, so you don't tune by hand:
+**Per-model replicas** — a **replica** is just a named preset for the presentation
+dials (`content_chars`, `fan_out`, `max_real`) tuned to match one *target model's*
+native search, so you don't set them by hand:
 ```python
 from search_inject import make_native_replica, REPLICAS   # {'claude','gpt','gemini','agnostic'}
 
 schema, handler = make_native_replica(
-    "claude", inject_urls,            # emulate claude's native presentation
-    schema_provider="openai",         # SDK shape you drive the model through (independent of target)
+    "claude", inject_urls,            # ← target: presents results like claude's native web_search
+    schema_provider="openai",         # SDK shape you drive the model through (independent of the target)
     backend="brave", backend_key=KEY, content_for=my_reader)
 ```
-`claude`/`gpt`/`gemini` match each surveyed native tool; `agnostic` is a neutral
-baseline; unsurveyed targets fall back to `agnostic`. **Validated:** driven through
-a replica vs its native tool, a model reaches the same verdict, reasons at native
-depth, and searches with native-like depth/breadth — see "Design & rationale".
+Pick the replica for the model you're testing, and **pair it with the matching
+`backend`** — the replica handles *presentation*, the backend handles the *source* of
+the real results. The two together (the recipe is in *Faithful setup per model* below)
+make the tool behave like that model's own search. `agnostic` is a neutral,
+no-specific-target preset (and the fallback for models we haven't surveyed).
+
+**Validated:** driven through a replica + matching backend vs its native tool, a model
+reaches the same verdict, reasons at native depth, and searches at native-like
+depth/breadth (see *Design & rationale*).
 
 ### The `web_fetch` companion tool
 
-Give the model a fetch tool too — serve controlled bytes for your injected URLs,
-pass everything else through to the live page:
+Search *surfaces* a page; **fetch** is how the model opens one to read it in full.
+Pair `make_web_fetch_tool` with your search tool so that when the model fetches one of
+*your* URLs it gets bytes **you** control, and every other URL passes through to the
+live web:
+
 ```python
 from search_inject import make_web_fetch_tool
 fetch_schema, fetch_handler = make_web_fetch_tool(
-    inject_urls, provider="openai", contents={my_url: my_full_text},
-    on_unknown="passthrough", real_fetch=my_reader)   # 'passthrough' fetches live; 'refuse' blocks
+    inject_urls,                       # which URLs are "ours"
+    provider="openai",                 # schema shape — same 3 providers as web_search
+    contents={my_url: my_full_text},   # the exact body served for an injected URL
+    on_unknown="passthrough",          # other URLs: "passthrough" = fetch live | "refuse" = block
+    real_fetch=my_reader)              # how live pages are fetched (default: a built-in reader)
+
+# in your tool loop, when the model calls web_fetch(url):
+page_text = fetch_handler(url)         # your bytes if url is injected, else the live page
 ```
 
-## Faithful per-model backends
+**How it composes with `web_search`.** The model searches, sees your page in the
+results (already carrying its content if you're content-bundling), and *may* call
+`web_fetch(url)` to read it in full. Injected URLs get `contents[...]`; anything else
+is fetched live (or refused). But recall from the primer above: **agents usually answer
+straight from the search results and fetch only occasionally** — so in most runs the
+`web_search` content does the work and `web_fetch` is a selective fallback.
 
-A replica sets the *presentation*; the **backend** sets the *source* of the real
-results. Pick the backend that matches the target model's own search, so the
-no-injection control ≈ its native search:
+**Two ways to fetch real pages — and a fairness dial (`render`).** By default an
+injected URL returns your `contents[...]` text verbatim while other URLs pass through a
+built-in reader. That's fine when you only care about the injected page, but it means
+your page and the *real* pages are extracted by different code — so a behavioural
+difference could be an artifact of the fetcher, not the content. If you're comparing
+across conditions, hold the fetcher constant: pass one `render(html) -> text` and the
+tool routes **both** your injected HTML *and* every live page through it, so extraction
+is identical everywhere.
 
-- **GPT / ChatGPT → `backend="openai"`** — calls OpenAI's *own* `web_search`
-  (results carry snippets + `utm_source=openai`). Most faithful for GPT.
-- **Claude → `backend="brave"`** — Brave *is* Claude's confirmed backend
-  (0.82 overlap), and gives clean uniform snippets. (Capturing Claude's own
-  `web_search` is possible but returns *encrypted* content → no snippet → use
-  Brave instead.)
-- **Gemini → `backend="gemini"`** — captures Gemini's *own* Google-search
-  grounding, resolves the `vertexaisearch` redirect links to the real page URLs,
-  and pulls each page's `og:description` snippet. Note Gemini already grounds
-  organically, so injection is mainly a *calibration anchor* here (injected-belief
-  vs its organic grounding belief).
+```python
+# consistent mode: one renderer for injected + real pages (no fetcher-artifact confound)
+from search_inject import make_web_fetch_tool, render_claude_style
+
+fetch_schema, fetch_handler = make_web_fetch_tool(
+    inject_urls,
+    contents={my_url: my_page_html},   # now raw HTML — it goes through `render` too
+    render=render_claude_style)        # html -> text, applied to injected AND live pages
+                                       # (`get=` overrides how live pages are fetched; default: a plain GET)
+```
+
+The package ships three calibrated renderers you can drop into `render=` (they emulate the
+native fetch tools — install with `pip install search-inject[render]`):
+
+| renderer | delivers | emulates |
+|---|---|---|
+| `render_claude_style` | body text **+ a `<meta>` header** (title, `og:*`, `twitter:*`) | Claude `web_fetch` |
+| `render_gemini_style` | body text **+ `<title>` only**, no `<meta>` | Gemini `url_context` |
+| `render_html` | lightly-slimmed **raw HTML** (keeps JSON-LD, classes, full DOM) | raw-HTML passthrough |
+
+The one behaviourally-relevant difference is the `<meta>` header — Claude surfaces it,
+Gemini doesn't — and it carries brand/publisher signals. Use `real_fetch` / plain
+passthrough when you *want* each real page fetched live and faithfully; use `render` when
+fairness across conditions matters more than live realism. A calibrated `render` also
+keeps page metadata a naive reader drops (publication dateline, `<meta>` header) that
+native fetchers surface.
+
+**Is it faithful?** Yes, on the models tested. Serving controlled bytes reproduces a
+live fetch, and this tool matches each model's *native* fetch behavior — claude and
+gemini reach the same verdict whether they use their own fetch tool or this one, with
+no sign they treat the served page as suspect. The numbers (and the search-side check)
+are in [Validation](#validation--does-the-tool-change-behavior). Agents fetch rarely,
+though, so it's the less-exercised path: if your use case leans on fetching, run the
+fetch control yourself first.
+
+### Setting up a fabricated site
+
+Authoring a [fabricated page](#real-pages-fabricated-pages) and wiring it into both tools
+takes three things — a URL, the page HTML, and a search-result entry (the title + snippet
+that shows in the results) — rendered the same way every real page is:
+
+```python
+from search_inject import (make_web_search_tool, make_web_fetch_tool,
+                           render_claude_style, fetch_claude_style)
+
+# 1. A URL. It does NOT need to be registered or hosted — it is intercepted.
+url = "https://materials-review.org/reports/aurographene-coating"
+
+# 2. The page as HTML. Include the metadata a native fetch surfaces — <title>, og:/
+#    twitter: tags, a byline + dateline — since render_claude_style puts that <meta>
+#    header in front of the model (that's where brand/publisher signals live).
+page_html = """<!DOCTYPE html><html><head>
+<title>Aurographene coating: an 18% efficiency gain — Materials Review</title>
+<meta property="og:site_name" content="Materials Review">
+<meta property="article:published_time" content="2026-04-29T09:00:00Z">
+</head><body>
+<h1>Aurographene coating reports an 18% relative efficiency gain</h1>
+<p>By A. Researcher, Materials Review — April 29, 2026</p>
+<p><!-- the article body making the claim you want to test --></p>
+</body></html>"""
+
+# 3. Wire the SAME url into both tools. Note the two `contents` differ by design:
+#    search bundles the *rendered text*; fetch serves the *HTML* and renders on the fly.
+search_schema, search = make_web_search_tool(
+    [url], provider="openai", backend="brave", backend_key=BRAVE_KEY,
+    snippets={url: {"title": "Aurographene coating: 18% efficiency gain",
+                    "snippet": "A gold-doped graphene monolayer raises silicon-PV efficiency..."}},
+    contents={url: render_claude_style(page_html)},      # bundle the rendered body into the result
+    content_chars=4500, content_for=fetch_claude_style)  # real results rendered the same way
+
+fetch_schema, fetch = make_web_fetch_tool(
+    [url], provider="openai",
+    contents={url: page_html}, render=render_claude_style)   # inject on fetch; real pages fetched live + rendered
+```
+
+You supply the *data* — URL, title, snippet, body — and the tool handles *presentation*:
+it blends your entry in among the real results, copies their URL-tag and snippet
+conventions onto it ([camouflage](#camouflage-on-by-default), on by default), bundles the
+body like every other result, and formats them all identically. So nothing about the
+**form** of your result flags it as injected — a search surfaces it among real hits, a
+fetch returns it, both rendered by the same `render_claude_style` as every genuine page.
+The only thing that differs from a real result is the **content you wrote** — which is the
+point: whether the model believes *that* is exactly what you're measuring. (Serving a page
+you never hosted is belief-neutral vs. a live fetch — see
+[Validation](#validation--does-the-tool-change-behavior).)
+
+One boundary to be honest about: the tool makes your entry indistinguishable in *form*,
+but it can't make implausible *data* look real — an obviously-fake domain or a snippet that
+contradicts the body is a content tell, not a formatting one. And the deeper asymmetry (a
+custom function tool vs. the provider's native server tool) is the one thing we can't erase
+— so we [measured](#validation--does-the-tool-change-behavior) it instead, and models don't
+behave differently through it.
+
+> **Tip — a homepage for the site root.** If a model might navigate to the domain root
+> (`materials-review.org/`) instead of the article, list that URL too with a short
+> masthead page, so it gets a plausible homepage rather than a live-fetch miss.
+
+## Faithful setup per model
+
+To emulate a specific model's native search, pair its **replica** (presentation) with
+its **backend** (source of the real results) — the two matched so your no-injection
+control ≈ that model's own search:
+
+| testing… | replica | backend | why this backend |
+|---|---|---|---|
+| **GPT** | `make_native_replica("gpt", …)` | `backend="openai"` | OpenAI's *own* `web_search` (snippets + `utm_source=openai`) |
+| **Claude** | `make_native_replica("claude", …)` | `backend="brave"` | Brave *is* Claude's backend (0.82 overlap); Claude's own tool returns *encrypted* content → no usable snippet, so Brave gives clean ones |
+| **Gemini** | `make_native_replica("gemini", …)` | `backend="gemini"` | Gemini's own Google-search grounding (redirect links resolved to real URLs). It already grounds organically, so here injection is a *calibration anchor* (injected-belief vs its organic belief) |
+| **cross-model / no target** | `make_native_replica("agnostic", …)` | any | neutral, identical presentation for every model — so the *tool* isn't a confound in a cross-model comparison |
+
+(You can also skip replicas entirely and set the dials yourself on
+`make_web_search_tool(...)` — the replicas are just convenient presets.)
 
 ## Camouflage (on by default)
 `make_web_search_tool(..., camouflage_inject=True)` makes each injected entry
@@ -193,28 +390,62 @@ Why the pieces are shaped the way they are:
 - **Camouflage + faithful backends, to remove seams.** Injected entries inherit the
   real backend's URL-tag and snippet conventions, and you pick the backend that
   matches the target model's own search — so the no-injection control ≈ native.
+- **One fetcher for every page, so the fetcher isn't a variable.** A native fetch
+  returns a provider-shaped *rendering*, not raw HTML — and if your injected page and
+  the real pages are rendered by different code, a behavioural difference could be a
+  fetcher artifact rather than a content effect. The `render` dial routes injected and
+  live pages through a single calibrated renderer (matching a chosen native fetcher), so
+  extraction is held constant and only the content varies.
 - **Validity is built in, not assumed.** The library is designed to be *audited*:
   run the no-injection control, compare to native, and read the reasoning traces.
   If the tool changes behaviour, you quantify the bias instead of hiding it.
 
-## Measuring how "organic" it looks (important for research)
-This controls the **retrieval** layer, so it answers *"given the page is in the
-results, does the model believe it?"* — **not** *"would the model find it
-organically?"* To keep results trustworthy:
+## Validation — does the tool change behavior?
 
-1. **No-injection control:** call `make_web_search_tool([], ...)` (real results
-   only) and compare the model's behavior to its **native** web-search on the
-   same queries. Match → the custom tool is transparent (the model doesn't
-   discount user-provided-tool results) → your injected numbers are valid.
-   Diverge → quantify the bias.
-2. **Trace inspection:** read the model's reasoning — does it flag the tool or
-   the top result as suspicious?
-3. **Seam hygiene:** results inherit the backend's real schema; use `rank="blend"`
-   on competitive queries so your hit isn't suspiciously #1; include real
-   competitors (any non-null backend does).
+The one risk that matters: a model *can* tell a user-provided tool from a native
+server tool, so the tool itself could bias results. We don't assume that away — we
+measured it, and the same controls are here for you to re-run in your own setup.
 
-(As noted in *Design & rationale*, a model can tell a user-provided tool from a
-native server tool — that's irreducible; these controls measure whether it matters.)
+**What we checked.**
+
+- **Search (native vs. ours).** Gave each model its *native* `web_search` vs. this
+  tool on the same real, non-injected queries, and compared both the verdict and the
+  search/reasoning behavior. Once the presentation was matched — content-bundling for
+  claude, fan-out for gemini (the two dials in *Design & rationale*) — verdicts agreed
+  and the reasoning traces showed no "this is a user tool" tells. The residual
+  differences were behaviorally inert (e.g. an internal query count a function tool
+  can't force).
+- **Fetch (native vs. ours).** Same design for `web_fetch`: claude and gemini were
+  given their native fetch tool (opening the live page) vs. this tool serving our
+  scrape of that *same* page, on a real page with both a TRUE claim and a
+  page-contradicted FALSE claim. Both models reached the same verdict through either
+  tool — **24/24 native, 24/24 ours**, zero runs flagging the served page as
+  injected/suspicious. The FALSE claim is the discriminator: it rules out a
+  blanket-accept artifact (an unfaithful tool would show up as disagreement on it).
+- **Content-serving is belief-neutral.** Serving byte-identical content produced the
+  same belief as letting the model fetch the live hosted page — a page you *serve* ≈ a
+  page the model *fetches*, given the same bytes.
+
+**Scope.** We can't clone the providers' native server tools byte-for-byte (they're
+not interceptable), so we match the *presentation the model consumes*, which is what
+drives behavior. Fetch was spot-checked on claude + gemini; since agents fetch rarely,
+it's the less-exercised path — if your use case is fetch-heavy, run that control
+yourself before trusting the numbers.
+
+**Run your own control.** This tool operates the **retrieval** layer, so it answers
+*"given the page is in the results, does the model believe it?"* — not *"would the
+model find it organically?"* To keep your results trustworthy:
+
+1. **No-injection control:** call `make_web_search_tool([], ...)` (real results only)
+   and compare the model's behavior to its native web search on the same queries.
+   Match → the custom tool is transparent → your injected numbers are valid. Diverge →
+   quantify the bias. (Same idea for fetch: your fetch tool vs. the native one on
+   identical pages.)
+2. **Trace inspection:** read the model's reasoning — does it flag the tool or the top
+   result as suspicious?
+3. **Seam hygiene:** results inherit the backend's real schema; use `rank="blend"` on
+   competitive queries so your hit isn't suspiciously #1; include real competitors
+   (any non-null backend does).
 
 ## Using inside Claude Code / Codex (agent harnesses)
 You can substitute a custom search for the agents' native one via **MCP**, not by
@@ -252,7 +483,10 @@ no-injection control so you can attribute any effect to the *content*, not the t
 - `core.py` — `make_web_search_tool` (the HOF; content-bundling + fan-out), `url_to_result`,
   `merge`, `camouflage`, `_readable_text`
 - `replicas.py` — `make_native_replica`, `REPLICAS` (per-model native-presentation presets)
-- `fetch.py` — `make_web_fetch_tool` (serve controlled bytes / passthrough live)
+- `fetch.py` — `make_web_fetch_tool` (serve controlled bytes / passthrough live / held-constant `render`)
+- `renderers.py` — calibrated `html -> text` renderers (`render_claude_style`,
+  `render_gemini_style`, `render_html`) for the `render=` dial; needs the `render` extra
+- `tests/` — pytest suite for the fetch tool + renderers (`pip install -e '.[dev]' && pytest tests`)
 - `backends.py` — `brave_search`, `serper_search`, `openai_search`, `gemini_search`,
   `null_search`, `get_backend`
 - `tools.py` — per-provider `web_search` schemas, `format_results`

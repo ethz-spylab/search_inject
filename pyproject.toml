@@ -26,7 +26,10 @@ Issues = "https://github.com/ethz-spylab/search_inject/issues"
 anthropic = ["anthropic>=0.40"]
 openai = ["openai>=1.40"]      # also covers the OpenRouter (OpenAI-compatible) path
 gemini = ["google-genai>=0.3"]
-all = ["anthropic>=0.40", "openai>=1.40", "google-genai>=0.3"]
+render = ["beautifulsoup4>=4.9", "html2text>=2020.1.16"]   # ready-made html->text renderers
+dev = ["pytest>=7", "beautifulsoup4>=4.9", "html2text>=2020.1.16"]   # run: pytest tests
+all = ["anthropic>=0.40", "openai>=1.40", "google-genai>=0.3",
+       "beautifulsoup4>=4.9", "html2text>=2020.1.16"]
 
 [tool.setuptools]
 # single-package layout: this directory IS the package `search_inject`

@@ -43,6 +43,7 @@ def make_native_replica(target, inject_urls, *, schema_provider="openai", **kw):
     """Return ``(schema, handler)`` for a web-search tool whose RESULT PRESENTATION emulates
     `target`'s native web search ('claude' | 'gpt' | 'gemini' | 'agnostic').
 
+    inject_urls     : the page(s) to surface, exactly as in make_web_search_tool (forwarded).
     schema_provider : SDK shape you call the model through ('anthropic'|'openai'|'gemini') —
                       independent of which model we emulate (e.g. emulate gpt's presentation
                       while driving claude via the anthropic schema).

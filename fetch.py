@@ -56,24 +56,46 @@ def _readable(url, timeout):
 
 
 def make_web_fetch_tool(inject_urls, *, provider="openai", contents=None,
-                        on_unknown="passthrough", real_fetch=None, timeout=20):
+                        on_unknown="passthrough", real_fetch=None, timeout=20,
+                        render=None, get=None):
     """inject_urls : URLs we control the content of.
-    contents      : {url: full_page_text}.
-    on_unknown    : 'passthrough' (real fetch) | 'refuse'.
+    provider      : 'anthropic'|'openai'|'gemini' — shape of the returned tool schema
+                    (same three as make_web_search_tool).
+    contents      : {url: page}. In LEGACY mode (render=None) this is the final text served
+                    verbatim. In CONSISTENT mode (render given) it is raw HTML, run through
+                    `render` just like a real page — so injected and real pages get the SAME
+                    extraction and no behavioural difference can be blamed on the fetcher.
+    on_unknown    : 'passthrough' (real fetch) | 'refuse' (other URLs return "unavailable").
+    real_fetch    : LEGACY-mode live fetcher, url->text (default: the built-in `_readable`).
+    timeout       : seconds for the default live GET (used by `_readable` / the default `get`).
+    render        : html->text renderer applied UNIFORMLY to injected HTML and to real-page
+                    HTML — the "one fetcher for all pages" fairness dial. Pass e.g.
+                    search_inject.render_claude_style. When set, `real_fetch` is ignored (real
+                    pages are fetched by `get` then rendered).
+    get           : CONSISTENT-mode raw fetcher, url->html (default: a plain requests GET).
     returns       : (schema, handler) where handler(url)->str.
     """
     contents = contents or {}
     inj = {_norm(u): contents.get(u, "") for u in inject_urls}
+    no_content = lambda url: f"Could not fetch {url}: the page returned no readable content."
+
+    def _default_get(url):
+        return requests.get(url, headers={"User-Agent": UA}, timeout=timeout).text
+    getter = get or _default_get
 
     def handler(url: str):
         key = _norm(url)
-        if key in inj and inj[key]:
-            return inj[key]
-        if on_unknown == "refuse" or key in inj:   # injected URL with no body → still ours, don't leak
-            return f"Could not fetch {url}: the page returned no readable content."
-        fn = real_fetch or _readable
+        if key in inj:                              # our page — never leak past this branch
+            raw = inj[key]
+            if not raw:
+                return no_content(url)
+            return render(raw) if render else raw   # consistent: our HTML through the shared renderer
+        if on_unknown == "refuse":
+            return no_content(url)
         try:
-            return fn(url, timeout)
+            if render:                              # consistent: real page through the SAME renderer
+                return render(getter(url))
+            return (real_fetch or _readable)(url, timeout)   # legacy: verbatim/crude passthrough
         except Exception as e:
             return f"Could not fetch {url}: {type(e).__name__}: {e}"
 

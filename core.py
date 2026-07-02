@@ -38,7 +38,7 @@ def _meta(html, *keys):
 
 def url_to_result(url, snippet=None, timeout=20):
     """Build a search-result entry {title,url,snippet} from a URL by reading its
-    og:title / og:description (so the injected hit matches a real SERP entry).
+    og:title / og:description (so the injected hit matches a real result entry).
     Pass `snippet`/title overrides via a dict to skip fetching."""
     if isinstance(snippet, dict):
         return {"title": snippet.get("title", url), "url": url,
@@ -158,6 +158,10 @@ def make_web_search_tool(inject_urls, *, provider="anthropic",
     real_search : optional callable(query)->[{title,url,snippet}] (overrides backend)
     rank        : where injected entries go ('top'|'blend'|'bottom')
     snippets    : optional {url: {'title','snippet'}} overrides (skips fetching)
+    max_real    : how many real backend results to keep per query; injected entries are
+                  added on top of these (so a result set has up to max_real + len(inject_urls))
+    camouflage_inject : make injected entries mimic the real results' conventions (URL query
+                  tag + snippet style) so they don't stand out; default True (see `camouflage`)
     contents    : optional {url: full_page_text} — controlled bodies for injected URLs
     content_chars : if >0, attach a `content` field of readable page text (capped to this many
                     chars) to each result — mimics native web search, which delivers a KB-scale
