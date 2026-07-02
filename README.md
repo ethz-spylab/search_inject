@@ -497,3 +497,6 @@ no-injection control so you can attribute any effect to the *content*, not the t
 MIT (see `LICENSE`). Built for LLM retrieval-/source-credibility research but
 domain-agnostic; if you use it in a paper, a citation to the accompanying work is
 appreciated.
+
+## Contact
+Contact Pura Peetathawatchai (pura_p@inf.ethz.ch) if you run into issues.
