@@ -66,6 +66,9 @@ def _readable_text(url, timeout=20, max_chars=5000):
         html = requests.get(url, headers={"User-Agent": UA}, timeout=timeout).text
     except Exception:
         return ""
+    html = html[:300_000]   # cap raw HTML before the regex passes: parsing full multi-MB docs is
+                            # CPU-pathological, and the output is truncated to a few KB anyway (the
+                            # article body sits near the top) → output-neutral, seconds → ms
     # drop non-content furniture so the excerpt reads like an article body (native tools deliver
     # clean readable content; noisy chrome makes agents re-fetch the page to get the real text)
     html = re.sub(r"(?is)<(script|style|noscript|svg|head|nav|header|footer|aside|form|button)[^>]*>.*?</\1>", " ", html)

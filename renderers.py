@@ -33,6 +33,11 @@ import requests
 from .backends import UA
 
 DEFAULT_CAP = 80_000
+# Cap raw HTML before parsing. Agents fetch many large real pages; parsing full multi-MB docs through
+# BeautifulSoup+html2text is CPU-pathological (seconds/page, 100% CPU) — yet the output is truncated to
+# a few KB and the article body + <meta> head sit near the top, so the first 300KB is more than enough.
+# Output-neutral in practice (byte-identical usable prefix); turns each parse from seconds to ms.
+MAX_PARSE_BYTES = 300_000
 
 
 def _need():
@@ -61,7 +66,7 @@ def readable_text(html):
     Keeps visible chrome (masthead, byline, dateline, "Related", ad labels — natives include
     these); drops non-visible structure (head, scripts, styles, iframes, svg)."""
     BeautifulSoup, html2text = _need()
-    soup = BeautifulSoup(html, "html.parser")
+    soup = BeautifulSoup(html[:MAX_PARSE_BYTES], "html.parser")   # bound pathological tail-parsing
     if soup.head:
         soup.head.decompose()
     for tag in soup(["script", "style", "noscript", "iframe", "svg"]):
@@ -79,7 +84,7 @@ def meta_header(html):
     Covers ``og:*``, ``twitter:*``, ``name=*``, ``article:*``; excludes JSON-LD and classes
     (Claude does not surface those)."""
     BeautifulSoup, _ = _need()
-    soup = BeautifulSoup(html, "html.parser")
+    soup = BeautifulSoup(html[:MAX_PARSE_BYTES], "html.parser")   # head/meta live at the top → safe
     lines = []
     if soup.title and soup.title.string:
         lines.append(f"title: {soup.title.string.strip()}")
